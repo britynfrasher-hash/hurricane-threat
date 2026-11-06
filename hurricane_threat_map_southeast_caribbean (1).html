@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Southeast & Caribbean Hurricane Threat Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{--ink:#17212b;--muted:#65717c;--line:#d9e0e5;--panel:#fff;--bg:#f4f6f7}
+*{box-sizing:border-box}body{margin:0;font-family:Arial,Helvetica,sans-serif;color:var(--ink);background:var(--bg)}
+header{padding:19px 22px;background:#102b46;color:#fff}header h1{margin:0 0 6px;font-size:25px}header p{margin:0;color:#d8e5ef;font-size:14px}
+main{max-width:1250px;margin:18px auto;padding:0 14px}
+.toolbar,.detail,.legend,.notice{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+input{flex:1;min-width:220px;padding:12px;border:1px solid #b8c4cd;border-radius:8px;font-size:16px}
+button{padding:12px 16px;border:0;border-radius:8px;background:#174e78;color:white;font-weight:700;cursor:pointer}
+button.secondary{background:#e7edf1;color:#17334a}
+#map{height:610px;border-radius:12px;border:1px solid var(--line);z-index:1}
+.columns{display:grid;grid-template-columns:minmax(0,1fr) 315px;gap:12px}
+h2{font-size:17px;margin:0 0 10px}.small{font-size:13px;color:var(--muted);line-height:1.5}
+#status{font-size:13px;line-height:1.5}#result{font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.legendgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.level{display:flex;align-items:center;gap:8px;font-size:12px}
+.swatch{width:28px;height:28px;border-radius:50%;display:inline-grid;place-items:center;color:white;font-weight:bold;flex:none}
+.notice{font-size:12px;line-height:1.5;color:#45515b}
+a{color:#075b92}.hint{font-size:12px;color:var(--muted);width:100%}
+.leaflet-popup-content{line-height:1.45}
+@media(max-width:850px){.columns{grid-template-columns:1fr}#map{height:500px}}
+</style>
+</head>
+<body>
+<header><h1>Hurricane Threat Map</h1><p>Southeastern United States & Caribbean · ZIP code and place search · Custom 0–7 index</p></header>
+<main>
+ <section class="toolbar">
+  <input id="search" aria-label="ZIP code or place" placeholder="ZIP code or place (e.g.  Miami, FL · Nassau, Bahamas · Kingston, Jamaica)">
+  <button id="go">Find location</button>
+  <button class="secondary" id="reset">Show region</button>
+  <div class="hint">Coverage is limited to the southeastern U.S. and Caribbean. ZIP codes outside the map area are rejected.</div>
+ </section>
+ <div class="columns">
+  <div><div id="map"></div></div>
+  <aside>
+   <section class="detail"><h2>Location & threat</h2><div id="result">Search a ZIP code or a city/island in the Caribbean.</div></section>
+   <section class="detail"><h2>Connection status</h2><div id="status" class="small">Ready. Search for a location to check available data.</div></section>
+   <section class="legend"><h2>Threat index</h2><div class="legendgrid" id="legend"></div></section>
+  </aside>
+ </div>
+ <section class="notice">
+  <b>Important:</b> Levels 0–7 are a custom educational index, not official NOAA/NHC categories. For U.S. ZIP codes, the map attempts to retrieve active National Weather Service alerts for the ZIP's approximate center. Alert titles are translated into a simplified score; this is not a complete hurricane-risk calculation. For Caribbean locations, this version locates the place but does not yet calculate a live island-specific score. Check the <a href="https://www.nhc.noaa.gov/" target="_blank" rel="noopener">National Hurricane Center</a> and local emergency-management agencies for official information. Never use this map alone to make evacuation decisions.
+ </section>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const colors=['#999995','#4d842d','#b1d23e','#f3d345','#efae3d','#ed7e32','#dc3824','#841b13'];
+const names=['No active alert found','Very low','Low','Moderate','Elevated','High','Very high','Extreme'];
+const REGION=[[5,-100],[39,-48]];
+const SE_US={minLat:23,minLon:-101,maxLat:39,maxLon:-74};
+const CARIB={minLat:5,minLon:-90,maxLat:27.5,maxLon:-54};
+const map=L.map('map',{maxBounds:REGION,maxBoundsViscosity:0.85,minZoom:3}).fitBounds(REGION);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+ maxZoom:18,attribution:'&copy; OpenStreetMap contributors'
+}).addTo(map);
+let selectedMarker=null, alertLayer=null;
+const legend=document.getElementById('legend');
+colors.forEach((c,i)=>{legend.insertAdjacentHTML('beforeend',`<div class="level"><span class="swatch" style="background:${c}">${i}</span><span>${names[i]}</span></div>`)});
+const result=document.getElementById('result'), status=document.getElementById('status');
+function setResult(title,html){result.innerHTML='<b>'+escapeHtml(title)+'</b><br>'+html}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function inBox(lat,lon,b){return lat>=b.minLat&&lat<=b.maxLat&&lon>=b.minLon&&lon<=b.maxLon}
+function inCoverage(lat,lon){return inBox(lat,lon,SE_US)||inBox(lat,lon,CARIB)}
+function markerAt(lat,lon,title,level){
+ if(selectedMarker)map.removeLayer(selectedMarker);
+ selectedMarker=L.circleMarker([lat,lon],{radius:11,color:'#fff',weight:2,fillColor:colors[level],fillOpacity:.95}).addTo(map)
+  .bindPopup(`<b>${escapeHtml(title)}</b><br>Custom index: ${level} — ${names[level]}`).openPopup();
+ map.setView([lat,lon],Math.max(map.getZoom(),7));
+}
+function scoreAlerts(features){
+ let score=0;
+ for(const f of (features||[])){
+  const e=String((f.properties||{}).event||'').toLowerCase();
+  if(e.includes('hurricane warning'))score=Math.max(score,7);
+  else if(e.includes('hurricane watch'))score=Math.max(score,6);
+  else if(e.includes('tropical storm warning'))score=Math.max(score,5);
+  else if(e.includes('tropical storm watch'))score=Math.max(score,4);
+  else if(e.includes('storm surge warning'))score=Math.max(score,6);
+  else if(e.includes('storm surge watch'))score=Math.max(score,4);
+  else if(e.includes('flood warning'))score=Math.max(score,3);
+  else score=Math.max(score,2);
+ }
+ return score;
+}
+async function fetchJson(url,options={},timeoutMs=12000){
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+ try{
+  const response=await fetch(url,{...options,signal:controller.signal,mode:'cors'});
+  if(!response.ok)throw new Error(`Server returned HTTP ${response.status}`);
+  return await response.json();
+ }catch(e){
+  if(e.name==='AbortError')throw new Error('The data service took too long to respond. Please try again.');
+  if(e instanceof TypeError)throw new Error('The browser could not connect to the data service. Make sure this page is published on an HTTPS website (not opened as a file), then try again.');
+  throw e;
+ }finally{clearTimeout(timer)}
+}
+async function lookupZip(zip){
+ // Zippopotam.us is the primary postal lookup; Nominatim is a fallback.
+ try{
+  const d=await fetchJson('https://api.zippopotam.us/us/'+encodeURIComponent(zip));
+  if(!d.places||!d.places.length)throw new Error('ZIP code was not found.');
+  const p=d.places[0];
+  return {lat:Number(p.latitude),lon:Number(p.longitude),label:`${p['place name']}, ${p['state abbreviation']} ${zip}`};
+ }catch(firstError){
+  try{
+   const d=await fetchJson('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&country=United%20States&postalcode='+encodeURIComponent(zip));
+   if(d.length)return {lat:Number(d[0].lat),lon:Number(d[0].lon),label:`${zip} · ${d[0].display_name.split(',').slice(0,3).join(',')}`};
+  }catch(fallbackError){}
+  throw firstError;
+ }
+}
+async function lookupPlace(q){
+ const url='https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&viewbox=-101,39,-54,5&bounded=1&q='+encodeURIComponent(q);
+ const d=await fetchJson(url,{'Accept-Language':'en'});
+ if(!d.length)throw new Error('Place not found inside the southeastern U.S./Caribbean map area. Try a city plus country, such as Nassau, Bahamas.');
+ const p=d.find(x=>inCoverage(Number(x.lat),Number(x.lon)));
+ if(!p)throw new Error('That result is outside the southeastern U.S. and Caribbean coverage area.');
+ return {lat:Number(p.lat),lon:Number(p.lon),label:p.display_name.split(',').slice(0,4).join(',')};
+}
+async function checkNws(lat,lon,label){
+ status.textContent='Location found. Checking active U.S. National Weather Service alerts…';
+ try{
+  const d=await fetchJson(`https://api.weather.gov/alerts/active?point=${lat},${lon}`,{'Accept':'application/geo+json'});
+  const fs=d.features||[],level=scoreAlerts(fs);
+  if(alertLayer)map.removeLayer(alertLayer);
+  const polys=fs.filter(f=>f.geometry);
+  if(polys.length)alertLayer=L.geoJSON(polys,{style:{color:'#a3241b',weight:2,fillColor:'#e34a33',fillOpacity:.12},
+   onEachFeature:(f,l)=>l.bindPopup(escapeHtml((f.properties||{}).event||'Weather alert')+'<br>'+escapeHtml((f.properties||{}).headline||''))}).addTo(map);
+  markerAt(lat,lon,label,level);
+  const items=fs.length?'<ul>'+fs.map(f=>`<li><b>${escapeHtml((f.properties||{}).event||'Alert')}</b>: ${escapeHtml((f.properties||{}).headline||'See official alert')}</li>`).join('')+'</ul>':'No active NWS alerts were returned for this point.';
+  setResult(label,`<span class="swatch" style="background:${colors[level]}">${level}</span> <b>${names[level]}</b><br><br>Active NWS alerts: ${fs.length}${items}`);
+  status.textContent='NWS alert request succeeded. This simplified score reflects alert titles only; it is not an official hurricane forecast.';
+ }catch(e){
+  markerAt(lat,lon,label,0);
+  setResult(label,`<span class="swatch" style="background:${colors[0]}">?</span> Threat score unavailable<br><br>The location was found, but the alert feed could not be reached. No threat level is being guessed. Check <a href="https://www.weather.gov/" target="_blank" rel="noopener">weather.gov</a>.`);
+  status.textContent='Location lookup succeeded, but the NWS alert request failed: '+e.message;
+ }
+}
+async function findLocation(){
+ const q=document.getElementById('search').value.trim();
+ if(!q){status.textContent='Enter a ZIP code or place name.';return}
+ if(alertLayer){map.removeLayer(alertLayer);alertLayer=null}
+ status.textContent='Searching for location…';
+ try{
+  const isZip=/^\d{5}$/.test(q);
+  const loc=isZip?await lookupZip(q):await lookupPlace(q);
+  if(!inCoverage(loc.lat,loc.lon))throw new Error('That ZIP code is outside the southeastern U.S. map area. Try a ZIP code in the Southeast or search a Caribbean place by name.');
+  if(isZip){
+   await checkNws(loc.lat,loc.lon,loc.label);
+  }else{
+   markerAt(loc.lat,loc.lon,loc.label,0);
+   setResult(loc.label,`<span class="swatch" style="background:${colors[0]}">?</span> Live threat score not connected for this Caribbean location.<br><br>Use the <a href="https://www.nhc.noaa.gov/" target="_blank" rel="noopener">National Hurricane Center</a> for current Atlantic storm tracks and advisories.`);
+   status.innerHTML='Place lookup succeeded. Caribbean island-specific warnings are not yet integrated. See <a href="https://www.nhc.noaa.gov/" target="_blank" rel="noopener">NHC active advisories</a> and local emergency services.';
+  }
+ }catch(e){
+  status.textContent=e.message;
+  setResult('Search could not be completed','Check the spelling or ZIP code and try again. If this page was opened directly from your computer, publish it on an HTTPS host first; some browsers block data requests from local files.');
+ }
+}
+document.getElementById('go').addEventListener('click',findLocation);
+document.getElementById('search').addEventListener('keydown',e=>{if(e.key==='Enter')findLocation()});
+document.getElementById('reset').addEventListener('click',()=>{
+ map.fitBounds(REGION);if(selectedMarker)map.removeLayer(selectedMarker);selectedMarker=null;
+ if(alertLayer){map.removeLayer(alertLayer);alertLayer=null}
+ setResult('Location & threat','Search a ZIP code in the southeastern U.S. or a city/island in the Caribbean.');
+ status.textContent='Map reset to the southeastern U.S. and Caribbean coverage area.';
+});
+</script>
+</body>
+</html>
